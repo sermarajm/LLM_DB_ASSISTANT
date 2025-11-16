@@ -3,7 +3,6 @@ import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from .model import DBConnectionCreate, AskRequest
-# Change to a local import within the 'app' directory
 from .db_manager import save_connection, test_connection, run_readonly_query
 from .schema_fetcher import fetch_schema
 from .llm_agent import generate_sql
@@ -15,20 +14,20 @@ logger = logging.getLogger("llm-db-assistant")
 
 app = FastAPI(title="LLM DB Assistant")
 
+@app.get("/")
+def root():
+    return {
+        "status": "running",
+        "service": "LLM DB Assistant Backend",
+        "message": "Your FastAPI backend is live on Render!"
+    }
 
 @app.post("/connect")
 def connect(cfg: DBConnectionCreate):
-    """
-    Save a connection config (encrypted in memory for demo),
-    then test the connection.
-    NOTE: Connections are stored in-memory for this demo; re-run /connect
-    after restarting the server or use persistent storage (recommended).
-    """
     save_connection(cfg.name, cfg.dict())
     try:
         test_connection(cfg.name)
     except Exception as e:
-        # remove saved connection if test fails (optional)
         raise HTTPException(status_code=400, detail=f"Connection test failed: {e}")
     return {"status": "connected", "name": cfg.name}
 
@@ -38,7 +37,6 @@ def get_schema(connection_name: str):
     try:
         schema = fetch_schema(connection_name)
     except KeyError as e:
-        # connection not found
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -47,21 +45,14 @@ def get_schema(connection_name: str):
 
 @app.post("/ask")
 def ask(req: AskRequest):
-    """
-    1) fetch schema (from cache or DB)
-    2) ask LLM to generate SQL
-    3) validate SQL safety
-    4) execute read-only query and return results
-    """
-    # 1) schema
+
     try:
         schema = fetch_schema(req.connection_name)
-    except KeyError as e:
+    except KeyError:
         raise HTTPException(status_code=404, detail=f"Connection not found: {req.connection_name}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not fetch schema: {e}")
 
-    # 2) generate SQL
     try:
         sql = generate_sql(schema, req.question)
     except Exception as e:
@@ -72,7 +63,6 @@ def ask(req: AskRequest):
 
     logger.info("Generated SQL: %s", sql)
 
-    # 3) safety check
     try:
         if not is_safe_sql(sql):
             raise HTTPException(status_code=400, detail="Generated SQL failed safety checks.")
@@ -81,25 +71,19 @@ def ask(req: AskRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"SQL safety check failed: {e}")
 
-    # 4) execute
     try:
         result = run_readonly_query(req.connection_name, sql)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Query execution error: {e}")
 
-    # support both return shapes:
-    # old: (cols, rows)
-    # new: {"columns": [...], "rows": [...]}
     if isinstance(result, dict):
         cols = result.get("columns", [])
         rows = result.get("rows", [])
     elif isinstance(result, (list, tuple)) and len(result) == 2:
         cols, rows = result
     else:
-        # last resort: try to coerce to JSON-able form
         raise HTTPException(status_code=500, detail="Unexpected query result format")
 
-    # Ensure columns is list (not e.g. a SQLAlchemy KeyView)
     try:
         columns_list = list(cols)
     except Exception:
